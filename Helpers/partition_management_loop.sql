@@ -5,7 +5,6 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 --SELECT * FROM dbo.PartitionsManagment 
 --SELECT * FROM PartitionsMaintenanceLog 
 
-
 DECLARE @debug bit = 1 --<---- Edite here
 
 IF OBJECT_ID('tempdb.dbo.#errors', 'U') IS NOT NULL DROP TABLE dbo.#errors;
@@ -88,18 +87,18 @@ WHILE @min_id <= @max_id
 BEGIN;
 	-- Parameters assignment
 	SELECT
-		@database									= [database]
-	 ,@partition_function				= partition_function
-	 ,@file_group_physical_path	=	ISNULL(file_group_physical_path, 'NONE'	)
-	 ,@days_to_keep_data				= days_to_keep_data
+	  @database						= [database]
+	 ,@partition_function			= partition_function
+	 ,@file_group_physical_path		= ISNULL(file_group_physical_path, 'NONE'	)
+	 ,@days_to_keep_data			= days_to_keep_data
 	 ,@num_future_partitions		= num_future_partitions
 	 ,@partition_boundry_unit		= partition_boundry_unit
-	 ,@create_empty_table				= create_empty_table
-	 ,@create_file_group				= create_file_group	
-	 ,@is_bcp										= is_bcp
-	 ,@bcp_path									= ISNULL(bcp_path,'NONE')
-	 ,@is_merge									= is_merge
-	 ,@is_split									= is_split
+	 ,@create_empty_table			= create_empty_table
+	 ,@create_file_group			= create_file_group	
+	 ,@is_bcp						= is_bcp
+	 ,@bcp_path						= ISNULL(bcp_path,'NONE')
+	 ,@is_merge						= is_merge
+	 ,@is_split						= is_split
  FROM dbo.#data WHERE id = @min_id;
  
  PRINT CHAR(10) + '-- ' + @database + ' | ' + @partition_function --+ ' ' + @empty_table--+ ' ' + cast(@days_to_keep_data as sysname) + ' ' + cast(@num_future_partitions as sysname) + ' ' + @partition_boundry_unit;
@@ -121,8 +120,8 @@ SELECT @command = 'EXEC [' + @database + '].dbo.sp_partition_managment
 		,@debug							= '		+ CAST(@debug AS char(1))	+ ';';
 
 BEGIN TRY;
-	--PRINT 'USE [' + @database + ']';
-	--PRINT @command + CHAR(10);
+	PRINT 'USE [' + @database + ']';
+	PRINT @command + CHAR(10);
 	
 	EXEC (@command);
 END TRY
@@ -138,8 +137,8 @@ BEGIN CATCH;
 					SELECT @Msg = (SELECT  @CurrentTime		AS 'EventTime'
 																,@ErrorProc			AS 'ObjectName'
 																,@ErrorNumber		AS 'Error/Number'
-																,@ErrorMessage	AS 'Error/Message'
-																,@ErrorSeverity AS 'Error/Severity'
+																,@ErrorMessage		AS 'Error/Message'
+																,@ErrorSeverity		AS 'Error/Severity'
 																,@ErrorState		AS 'Error/State'
 																,@ErrorLine			AS 'Error/Line'
 													FOR XML PATH('Event'));  
@@ -147,7 +146,6 @@ BEGIN CATCH;
 				PRINT	'  ***********  ' + CAST(@Msg AS nvarchar(max));
 
 				INSERT #errors ([partition_function] ,[error_message]) SELECT @partition_function, @ErrorMessage;
-				
 END CATCH;
 
 	SELECT @min_id += 1;
@@ -156,7 +154,7 @@ END;
 --IF EXISTS(SELECT * FROM #errors) 	RAISERROR (@ErrorMessage, @ErrorSeverity, @ErrorState, @ErrorLine);  
 
 
--- If there were any failures we raise error to "fail" the job step
+-- If there were any failures we raise an error to "fail" the job step
 IF EXISTS (SELECT * FROM #errors)
 BEGIN;
 	DECLARE @failed_partition_function varchar(max) = '';
@@ -165,10 +163,5 @@ BEGIN;
 	FROM dbo.#errors 
 	ORDER BY id;
 
-RAISERROR
-    (	N'Failed on the following partition_functions: %s.',
-			16, -- Severity.
-			1, -- State.
-			@failed_partition_function -- First substitution argument.
-    ); 
+	RAISERROR (N'Failed on the following partition_functions: %s.', 16, 1, @failed_partition_function ); 
 END;
