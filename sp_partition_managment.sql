@@ -1,9 +1,11 @@
-USE master;
-SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON;
-
-IF OBJECT_ID('dbo.sp_partition_managment', 'P') IS NOT NULL DROP PROCEDURE dbo.sp_partition_managment;
+USE [master]
 GO
-CREATE PROCEDURE [dbo].[sp_partition_managment]
+/****** Object:  StoredProcedure [dbo].[sp_partition_managment]    Script Date: 16/02/2023 18:11:06 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[sp_partition_managment]
 (
   @partition_function sysname
  ,@days_to_keep_data int 
@@ -510,7 +512,7 @@ BEGIN;
 										SELECT @command = 
 									--'TRUNCATE TABLE [' + @schema + '].[' + @table + '_Empty' + '];' + CHAR(10) + 'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION $PARTITION.[' + @partition_function + '](' + @value + ') TO [' + @schema + '].[' + @table + '_Empty' + '] PARTITION $PARTITION.[' + @partition_function + '](' + @value + ');'
 									'TRUNCATE TABLE [' + @schema + '].[' + @empty_table + '];' + CHAR(10) + 
-										'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @empty_table+ '] PARTITION ' + @partition_number + ';';
+										'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @empty_table + '] PARTITION ' + @partition_number + ';';
 										PRINT @command;
 										IF @debug = 0 
 										BEGIN;
@@ -581,33 +583,78 @@ BEGIN;
 				
 								-- Export the data we stwitched out to the file system using bcp out
 								IF @is_bcp = 1
-									BEGIN;
-											-- A one time print of the @rc variable
-											IF @print_bcp = 0 BEGIN; SELECT @print_bcp = 1; PRINT 'DECLARE @rc int = 0;'; END;
+								BEGIN;
+									-- A one time print of the @rc variable
+									-- IF @print_bcp = 0 BEGIN; SELECT @print_bcp = 1; PRINT 'DECLARE @rc int = 0;'; END;
 
-											/*
-											-- If the partitioning key is datetime then we convert to int for the bcp file name 
-											IF @part_key_data_type = 0 SELECT @bcp_value = CAST(dbo.DatetimeToInt(CAST(REPLACE(@value,'''','') AS datetime), @part_key_len) AS sysname)
-											ELSE 
-											IF @part_key_data_type IN (1,2) SELECT @bcp_value = @value;
-											*/
+									/*
+									-- If the partitioning key is datetime then we convert to int for the bcp file name 
+									IF @part_key_data_type = 0 SELECT @bcp_value = CAST(dbo.DatetimeToInt(CAST(REPLACE(@value,'''','') AS datetime), @part_key_len) AS sysname)
+									ELSE 
+									IF @part_key_data_type IN (1,2) SELECT @bcp_value = @value;
+									*/
 
-											-- Remove any char that is not an alpha numeric char
-											SELECT @bcp_value = dbo.fn_RemoveChars(@value, '0-9a-z '); 
-											-- Replcae the space 
-											SELECT @bcp_value = REPLACE(@bcp_value, ' ', '_') 
-
-											SELECT @bcp_command = 'EXEC @rc = sys.xp_cmdshell ''bcp ' + @database + '.dbo.' + @empty_table + ' OUT ' + @bcp_path + @table + '_' + @bcp_value + '.bcp -k -n -T -E -S' + @server + ''', no_output;
-				IF (@@ERROR <> 0 OR @rc <> 0) BEGIN; PRINT ''-- bcp failed on partition number: ' + @partition_number + ' partiton value: ' + @bcp_value + ' Terminating.''; RAISERROR (''Error raised in the bcp block at partition number: %s partiton value: %s '', 16, 1, ''' + @partition_number + ''', ''' + @bcp_value + '''); END;';
-											PRINT @bcp_command --+ CHAR(10) + 'GO';
-											IF @debug = 0 
-											BEGIN;
-												SELECT @operation = 'BCP';
-												INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-												SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, NULL, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @bcp_command;
-												EXEC (@command);
-											END;
+									-- Remove any char that is not an alpha numeric char
+									SELECT @bcp_value = dbo.fn_RemoveChars(@value, '0-9a-z '); 
+									-- Replcae the space 
+									SELECT @bcp_value = REPLACE(@bcp_value, ' ', '_');
+									DECLARE @bcp_file nvarchar(4000) =  @bcp_path + @table + '_' + @bcp_value + '.bcp';
+											
+									IF (SELECT DBA.dbo.SQLIO_fnFileExists(@bcp_file) ) = 1
+									BEGIN
+										PRINT '-- File exists: ' + @bcp_file + char(10);
+										IF @debug = 0 
+										BEGIN;
+											SELECT @operation = 'BCP File exists';
+											INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+											SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, NULL, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @bcp_file;
+											--EXEC (@bcp_command); Yaniv Etrogi 20230214. This is not to overide the existing file.
+										END;
+										BREAK; -- Skip this iteration.
 									END;
+
+
+									-- If the partition has no rows skipt it so we do not create files with 0 bytes (potentially overriding an existing file).
+									-- This was added as a preventive step to cases where an existing file was overiden.
+									DECLARE @partition_rows_count_command nvarchar(max), @params nvarchar(500), @partition_rows_count int; 
+									SELECT @params = N'@partition_rows_count int OUTPUT, @partition_number int, @empty_table sysname';
+									SELECT @partition_rows_count_command = 
+									N'SELECT @partition_rows_count = (SELECT rows FROM sys.partitions p WHERE p.object_id = OBJECT_ID(''' + @empty_table + ''') AND index_id IN (0,1) AND p.partition_number = ' + CAST(@partition_number AS sysname) + ');';
+									
+									--PRINT @partition_rows_count_command;
+									EXEC sp_executesql @partition_rows_count_command, @params
+										, @partition_rows_count = @partition_rows_count OUTPUT, @empty_table = @empty_table, @partition_number = @partition_number;
+									--PRINT '@partition_rows_count: ' + cast(@partition_rows_count as sysname) + ' | @partition_number: ' + cast(@partition_number as sysname);
+									
+									IF @partition_rows_count = 0
+									BEGIN;
+										print '-- Empty partition. Skipping partiton number ' + CAST(@partition_number AS sysname) + ' since it is empty.';
+										IF @debug = 0 
+										BEGIN;
+											SELECT @operation = 'BCP Empty Partition';
+											INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+											SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, NULL, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @bcp_command;
+										END;
+										BREAK; -- Skip this iteration.
+									END;
+									 
+									-- 20230215 Yaniv Etrogi: Add transaction block for the bcp out.
+									-- If there is an error in the bcp out we Switch the data back in to the source base table
+									SELECT @bcp_command = 
+									'BEGIN TRAN; DECLARE @rc int = 0; EXEC @rc = sys.xp_cmdshell ''bcp ' + @database + '.dbo.' + @empty_table + ' OUT ' + @bcp_path + @table + '_' + @bcp_value + '.bcp -k -n -T -E -S' + @server + ''' COMMIT TRAN;
+		IF (@@ERROR <> 0 OR @rc <> 0) BEGIN; PRINT ERROR_MESSAGE();
+		ALTER TABLE [' + @schema + '].[' + @empty_table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @table + '] PARTITION ' + @partition_number + ';
+		PRINT ''-- bcp failed on partition number: ' + @partition_number + ' partiton value: ' + @bcp_value + ' Terminating.'' IF @@TRANCOUNT > 0 ROLLBACK TRAN; RAISERROR (''Error raised in the bcp block at partition number: %s partiton value: %s '', 16, 1, ''' + @partition_number + ''', ''' + @bcp_value + '''); END;';
+									PRINT @bcp_command + CHAR(10) + 'GO';
+											
+									IF @debug = 0 
+									BEGIN;
+										SELECT @operation = 'BCP';
+										INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+										SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, NULL, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @bcp_command;
+										EXEC (@bcp_command);
+									END;
+								END;
 
 								-- Truncate command out side the inner loop as it serves all cases
 								SELECT @truncate_command = 'TRUNCATE TABLE [' + @schema + '].[' + @empty_table + '];' + CHAR(10);
@@ -1190,6 +1237,3 @@ BEGIN CATCH;
 
         RAISERROR (@ErrorMessage, @ErrorSeverity, @ErrorState); 
 END CATCH;
-GO
-EXEC sp_ms_marksystemobject 'sp_partition_managment';
-GO
