@@ -1,9 +1,11 @@
 USE [master]
 GO
-SET ANSI_NULLS ON;
-SET QUOTED_IDENTIFIER ON;
+/****** Object:  StoredProcedure [dbo].[sp_partition_managment]    Script Date: 16/02/2023 18:11:06 ******/
+SET ANSI_NULLS ON
 GO
-CREATE OR ALTER   PROCEDURE [dbo].[sp_partition_managment]
+SET QUOTED_IDENTIFIER ON
+GO
+ALTER PROCEDURE [dbo].[sp_partition_managment]
 (
   @partition_function sysname
  ,@days_to_keep_data int 
@@ -145,10 +147,6 @@ Histrory
 						Modified code:		
 						IF @current_max_boundry IS NULL SELECT @current_max_boundry = CURRENT_TIMESTAMP + 1
 
-02/01/2025 Yaniv Etrogi 
-			1. Add support for the new syntax: TRUNCATE TABLE [schema_name].[table_name] WITH (PARTITIONS (partition_number));
-				This elimintes the need to create an Empty table for the switch out command and decreases points of failure.
-
 
 */
 
@@ -169,21 +167,9 @@ DECLARE  @schema sysname, @table sysname, @empty_table sysname, @counter int = 1
 --SELECT  @file_group_name_wildcard = 'FG_' + @table + '_*'; Yaniv Etrogi 20160327 - Moved this asinmnet latter on after the @table is initiated because it resulted in null
 SELECT  @server = @@SERVERNAME, @database = DB_NAME();
  
--- Get the version in order to detrmone if the truncate partition syntax can be used: SQL Server 2016 SP1 or newer
-DECLARE @ProductVersion VARCHAR(50) = CAST(SERVERPROPERTY('ProductVersion') AS VARCHAR(50));
-DECLARE @MajorVersion INT = CAST(PARSENAME(@ProductVersion, 4) AS INT);
-DECLARE @MinorVersion INT = CAST(PARSENAME(@ProductVersion, 3) AS INT);
-DECLARE @BuildVersion INT = CAST(PARSENAME(@ProductVersion, 2) AS INT);
-DECLARE @can_truncate_partition bit = 0;
-
-IF (@MajorVersion = 13 AND @BuildVersion >= 4001)	-- SQL Server 2016 SP1 or newer
-OR (@MajorVersion > 13)								-- SQL Server 2017 and newr
-BEGIN;
-    SELECT @can_truncate_partition = 1;
-END;
-
 
 BEGIN TRY;
+
 
 IF NOT EXISTS(SELECT * FROM sys.partition_functions WHERE name = @partition_function)
 BEGIN;	
@@ -516,99 +502,84 @@ BEGIN;
 								FROM dbo.#partitioned_tables WHERE id = @min_id_partitioned_tables;
 								--SELECT * FROM #partitioned_tables
 
-								-- 2016 sp1 onwards new truncate parttiton syntax. No need to use switch out.
-								IF @can_truncate_partition = 1
-								BEGIN;
-									SELECT @command = 'TRUNCATE TABLE [' + @schema + '].[' + @table + '] WITH (PARTITIONS (' + @partition_number + '));';
-									PRINT @command;
-									IF @debug = 0 
-									BEGIN;
-										SELECT @operation = 'TRUNCATE PARTITION';
-										INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-										SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @command;
-										EXEC (@command);
-									END;
-								END;
-									ELSE
-								BEGIN;
-										-- Remove the appostrophy for the INSERT to the log table
-										SELECT @new_value = REPLACE(@value,'''',''); 
-										SELECT @empty_table = @table + '_Empty';
+								-- Remove the appostrophy for the INSERT to the log table
+								SELECT @new_value = REPLACE(@value,'''',''); 
+								SELECT @empty_table = @table + '_Empty';
 														
-										-- Use an existing Empty table for the Switch that resides on the same ps
-										IF @create_empty_table = 0
+								-- Use an existing Empty table for the Switch that resides on the same ps
+								IF @create_empty_table = 0
+								BEGIN;
+										SELECT @command = 
+									--'TRUNCATE TABLE [' + @schema + '].[' + @table + '_Empty' + '];' + CHAR(10) + 'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION $PARTITION.[' + @partition_function + '](' + @value + ') TO [' + @schema + '].[' + @table + '_Empty' + '] PARTITION $PARTITION.[' + @partition_function + '](' + @value + ');'
+									'TRUNCATE TABLE [' + @schema + '].[' + @empty_table + '];' + CHAR(10) + 
+										'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @empty_table + '] PARTITION ' + @partition_number + ';';
+										PRINT @command;
+										IF @debug = 0 
 										BEGIN;
-												SELECT @command = 
-												--'TRUNCATE TABLE [' + @schema + '].[' + @table + '_Empty' + '];' + CHAR(10) + 'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION $PARTITION.[' + @partition_function + '](' + @value + ') TO [' + @schema + '].[' + @table + '_Empty' + '] PARTITION $PARTITION.[' + @partition_function + '](' + @value + ');'
-												'TRUNCATE TABLE [' + @schema + '].[' + @empty_table + '];' + CHAR(10) + 
-													'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @empty_table + '] PARTITION ' + @partition_number + ';';
-												PRINT @command;
-												IF @debug = 0 
-												BEGIN;
-													SELECT @operation = 'SWITCH';
-													INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-													SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @command;
-													EXEC (@command);
-												END;
-										END; --IF @create_empty_table = 0
+											SELECT @operation = 'SWITCH';
+											INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+											SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @command;
+											EXEC (@command);
+										END;
+								END; --IF @create_empty_table = 0
 				
-										-- Create an Empty table for the Switch in cases where there is no Empty tbale available on the partition schema
-										IF @create_empty_table = 1
-										BEGIN;
-													SELECT @partition_number_int = CAST(@partition_number AS int);
+								-- Create an Empty table for the Switch in cases where there is no Empty tbale available on the partition schema
+								IF @create_empty_table = 1
+								BEGIN;
+											SELECT @partition_number_int = CAST(@partition_number AS int);
 
-												 -- Moved this code to: sp_generate_table_script 
-													SELECT @command = 'IF OBJECT_ID(''[' + @schema + '].[' + @empty_table + ']'', ''U'') IS NOT NULL DROP TABLE [' + @schema + '].[' + @empty_table +'];';
-													PRINT @command;							
-													IF @debug = 0 
-													BEGIN;
-														SELECT @operation = 'DROP TABLE';
-														INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-														SELECT CURRENT_TIMESTAMP, @operation, @database, @schema,  @empty_table, @partition_function, @partition_schema, @read_only_file_group, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, NULL, NULL, NULL, @command;
-														EXEC (@command);
-													END;
+										 -- Moved this code to: sp_generate_table_script 
+											SELECT @command = 'IF OBJECT_ID(''[' + @schema + '].[' + @empty_table + ']'', ''U'') IS NOT NULL DROP TABLE [' + @schema + '].[' + @empty_table +'];';
+											PRINT @command;							
+											IF @debug = 0 
+											BEGIN;
+												SELECT @operation = 'DROP TABLE';
+												INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+												SELECT CURRENT_TIMESTAMP, @operation, @database, @schema,  @empty_table, @partition_function, @partition_schema, @read_only_file_group, NULL, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, NULL, NULL, NULL, @command;
+												EXEC (@command);
+											END;
 
-													-- Generate the create table command
-													SELECT @command = '';
-													--PRINT @schema = @schema, @table = @table, @empty_table = @empty_table, @file_group = @file_group,  @cmd = @command OUTPUT;
-													EXEC dbo.sp_generate_table_script @DBName	= @database, @SchemaName = @schema, @TableName = @table, @NewTableName = @empty_table, @FileGroup = @file_group, @TableCommand = @command OUTPUT ,@PartitionNumber = @partition_number_int;
-													--PRINT 'EXEC dbo.sp_generate_table_script @DBName	= ''' + @database + ''', @SchemaName = ''' + @schema + ''', @TableName = ''' + @table + ''', @NewTableName = ''' + @empty_table + ''', @FileGroup = ''' + @file_group + ''', @TableCommand =  @command OUTPUT ,@PartitionNumber = ' + CAST(@partition_number_int AS sysname )+ '';
+											-- Generate the create table command
+											SELECT @command = '';
+											--PRINT @schema = @schema, @table = @table, @empty_table = @empty_table, @file_group = @file_group,  @cmd = @command OUTPUT;
+											EXEC dbo.sp_generate_table_script @DBName	= @database, @SchemaName = @schema, @TableName = @table, @NewTableName = @empty_table, @FileGroup = @file_group, @TableCommand = @command OUTPUT ,@PartitionNumber = @partition_number_int;
+											--PRINT 'EXEC dbo.sp_generate_table_script @DBName	= ''' + @database + ''', @SchemaName = ''' + @schema + ''', @TableName = ''' + @table + ''', @NewTableName = ''' + @empty_table + ''', @FileGroup = ''' + @file_group + ''', @TableCommand =  @command OUTPUT ,@PartitionNumber = ' + CAST(@partition_number_int AS sysname )+ '';
 
-													PRINT  @command + CHAR(10);
-													IF @debug = 0 
-													BEGIN;
-														SELECT @operation = 'CREATE TABLE';
-														INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-														SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @empty_table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, NULL, NULL, NULL, NULL, @command;
-														EXEC (@command);
-													END;
-													SELECT @command = '';	
+											PRINT  @command + CHAR(10);
+											IF @debug = 0 
+											BEGIN;
+												SELECT @operation = 'CREATE TABLE';
+												INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+												SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @empty_table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, NULL, NULL, NULL, NULL, @command;
+												EXEC (@command);
+											END;
+											SELECT @command = '';	
 
-													-- Generate the create indexe(s) command
-													EXEC dbo.sp_generate_indexes_script @DBName = @database, @SchemaName	= @schema, @TableName = @table, @NewTableName = @empty_table , @FileGroup = @file_group , @PartitionNumber = @partition_number_int, @IndexesCommand = @command OUTPUT;
-													PRINT  @command + CHAR(10);
-													IF @debug = 0 
-													BEGIN;
-														SELECT @operation = 'CREATE INDEXES';
-														INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-														SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @empty_table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, NULL, NULL, NULL, NULL, @command;
-														EXEC (@command);
-													END;
+											-- Generate the create indexe(s) command
+											EXEC dbo.sp_generate_indexes_script @DBName = @database, @SchemaName	= @schema, @TableName = @table, @NewTableName = @empty_table , @FileGroup = @file_group , @PartitionNumber = @partition_number_int, @IndexesCommand = @command OUTPUT;
+											PRINT  @command + CHAR(10);
+											IF @debug = 0 
+											BEGIN;
+												SELECT @operation = 'CREATE INDEXES';
+												INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+												SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @empty_table, @partition_function, @partition_schema, @file_group, NULL, NULL, NULL, NULL, NULL, NULL, NULL, @command;
+												EXEC (@command);
+											END;
 
-													-- Use a different syntax for the Switch since we switch to a none partitioned table
-													SELECT @command = 
-													--	'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION $PARTITION.[' + @partition_function + '](' + @value + ') TO [' + @schema + '].[' + @table + '_Empty];';
-													'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @empty_table + '];';
-													PRINT @command;
-													IF @debug = 0 
-													BEGIN;
-														SELECT @operation = 'SWITCH';
-														INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
-														SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, @partition_schema, @file_group, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @command;
-														EXEC (@command);
-													END;
-										END; -- End: IF @create_empty_table = 1
-								END;
+											-- Use a different syntax for the Switch since we switch to a none partitioned table
+											SELECT @command = 
+											--	'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION $PARTITION.[' + @partition_function + '](' + @value + ') TO [' + @schema + '].[' + @table + '_Empty];';
+											'ALTER TABLE [' + @schema + '].[' + @table + '] SWITCH PARTITION ' + @partition_number + ' TO [' + @schema + '].[' + @empty_table + '];';
+											PRINT @command;
+											IF @debug = 0 
+											BEGIN;
+												SELECT @operation = 'SWITCH';
+												INSERT DBA.dbo.PartitionsMaintenanceLog (insert_time, operation, [database], [schema], [table], partition_function, partition_schema, file_group, data_file,physical_name, partition_number, partition_boundry, [rows], size_mb, error, command)
+												SELECT CURRENT_TIMESTAMP, @operation, @database, @schema, @table, @partition_function, @partition_schema, @partition_schema, @file_group, NULL, NULL, CASE WHEN @part_key_data_type = 0 THEN @new_value WHEN @part_key_data_type IN (1,2) THEN dbo.IntToDatetime (@new_value) END, @rows, @size_mb, NULL, @command;
+												EXEC (@command);
+											END;
+								END; -- End: IF @create_empty_table = 1
+
 				
 								-- Export the data we stwitched out to the file system using bcp out
 								IF @is_bcp = 1
@@ -1266,7 +1237,3 @@ BEGIN CATCH;
 
         RAISERROR (@ErrorMessage, @ErrorSeverity, @ErrorState); 
 END CATCH;
-go
-
-USE master;EXEC sp_MS_marksystemobject 'sp_partition_managment';
-GO
